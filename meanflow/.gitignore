@@ -1,0 +1,14 @@
+*.pt
+*.pth
+*.pkl
+*.onnx
+*.pyc
+*.zip
+*.txt
+weights
+__pycache__
+data/cifar/
+data/cifar_data/
+data/mnist_data/
+vis_results/
+results/snapshots

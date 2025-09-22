@@ -1,3 +1,4 @@
+import os
 import time
 import numpy as np
 import random
@@ -185,7 +186,7 @@ class MetricLogger(object):
             header, total_time_str, total_time / len(iterable)))
 
 
-# ---------------------- Optimize functions ----------------------
+# ---------------------- Model functions ----------------------
 def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
@@ -200,59 +201,31 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
 
     return total_norm
 
-class NativeScalerWithGradNormCount:
-    state_dict_key = "amp_scaler"
-
-    def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
-
-    def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
-        self._scaler.scale(loss).backward()
-        if update_grad:
-            if clip_grad is not None:
-                assert parameters is not None
-                self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
-                norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
-            else:
-                self._scaler.unscale_(optimizer)
-                norm = get_grad_norm_(parameters)
-            self._scaler.step(optimizer)
-            self._scaler.update()
-        else:
-            norm = None
-        return norm
-
-    def state_dict(self):
-        return self._scaler.state_dict()
-
-    def load_state_dict(self, state_dict):
-        self._scaler.load_state_dict(state_dict)
-
-
-# ---------------------- Model functions ----------------------
 def load_model(args, model_without_ddp, optimizer, lr_scheduler):
-    args.start_epoch = 0
-    if args.resume and args.resume.lower() != 'none':
-        print("=================== Load checkpoint ===================")
-        if args.resume.startswith('https'):
+    if args.resume:
+        if args.resume.startswith("https"):
             checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
+                args.resume, map_location="cpu", check_hash=True
+            )
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+            checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
+        model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
         print("Resume checkpoint %s" % args.resume)
-        
-        if 'optimizer' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
-            print('- Load optimizer from the checkpoint. ')
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            args.start_epoch = checkpoint['epoch'] + 1
+        if (
+            "optimizer" in checkpoint
+            and "epoch" in checkpoint
+            and not args.eval_only
+        ):
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            args.start_epoch = checkpoint["epoch"] + 1
+            print(f"Start epoch set to {args.start_epoch}")
+            print("With optim & sched!")
 
-        if 'lr_scheduler' in checkpoint:
-            print('- Load lr scheduler from the checkpoint. ')
-            lr_scheduler.load_state_dict(checkpoint.pop("lr_scheduler"))
-
-def save_model(args, model_without_ddp, optimizer, lr_scheduler, epoch, metrics=None):
+def save_model(args, model_without_ddp, optimizer, lr_scheduler, epoch, local_rank):
     output_dir = Path(args.output_dir)
+    checkpoint_path = output_dir / ('checkpoint-{}.pth'.format(epoch))
+
     to_save = {
         'model': model_without_ddp.state_dict(),
         'optimizer': optimizer.state_dict(),
@@ -260,79 +233,15 @@ def save_model(args, model_without_ddp, optimizer, lr_scheduler, epoch, metrics=
         'epoch': epoch,
         'args': args,
     }
-    if metrics is None:
-        checkpoint_path = output_dir / ('checkpoint-{}.pth'.format(epoch))
-    else:
-        checkpoint_path = output_dir / ('checkpoint-{}_psnr_{}_ssim_{}.pth'.format(epoch, metrics[0], metrics[1]))
-        to_save["psnr"] = metrics[0]
-        to_save["ssim"] = metrics[1]
-
     torch.save(to_save, checkpoint_path)
 
-def save_sampler(args, model_without_ddp, optimizer, lr_scheduler, epoch):
-    output_dir = Path(args.output_dir)
-    to_save = {
-        'model': model_without_ddp.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'lr_scheduler': lr_scheduler.state_dict(),
-        'epoch': epoch,
-        'args': args,
-    }
-    checkpoint_path = output_dir / ('checkpoint-{}.pth'.format(epoch))        
-    torch.save(to_save, checkpoint_path)
+    # Delete old checkpoints
+    if local_rank <= 0:
+        to_del = epoch - args.save_ckpt_num * args.save_ckpt_freq
+        old_ckpt = output_dir / ('checkpoint-{}.pth'.format(to_del))
+        if os.path.exists(old_ckpt):
+            print(" > remove old checkpoint: ", old_ckpt)
+            os.remove(old_ckpt)
+    if args.distributed:
+        dist.barrier()
 
-
-# ---------------------- Tools for GAN ----------------------
-def load_gan_model(args, model, discriminator, optimizer_G, optimizer_D, lr_scheduler_G, lr_scheduler_D):
-    args.start_epoch = 0
-    if args.resume and args.resume.lower() != 'none':
-        print("=================== Load checkpoint ===================")
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        model.load_state_dict(checkpoint['model'])
-        print("Resume checkpoint for Generator: %s" % args.resume)
-                
-        discriminator.load_state_dict(checkpoint['discriminator'])
-        print("Resume checkpoint for Discriminator: %s" % args.resume)
-        
-        # Optimizer for Generator
-        if 'optimizer_G' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
-            print('- Load optimizer from the checkpoint. ')
-            optimizer_G.load_state_dict(checkpoint['optimizer_G'])
-            args.start_epoch = checkpoint['epoch'] + 1
-
-        # Optimizer for Discriminator
-        if 'optimizer_D' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
-            print('- Load optimizer from the checkpoint. ')
-            optimizer_D.load_state_dict(checkpoint['optimizer_D'])
-            args.start_epoch = checkpoint['epoch'] + 1
-
-        # LrScheduler for Generator
-        if 'lr_scheduler_G' in checkpoint:
-            print('- Load lr scheduler from the checkpoint. ')
-            lr_scheduler_G.load_state_dict(checkpoint.pop("lr_scheduler_G"))
-
-        # LrScheduler for Discriminator
-        if 'lr_scheduler_D' in checkpoint:
-            print('- Load lr scheduler from the checkpoint. ')
-            lr_scheduler_D.load_state_dict(checkpoint.pop("lr_scheduler_D"))
-
-def save_gan_model(args, model, discriminator, optimizer_G, optimizer_D, lr_scheduler_G, lr_scheduler_D, epoch, metrics=None):
-    output_dir = Path(args.output_dir)
-    to_save = {
-        'model':          model.state_dict(),
-        'discriminator':  discriminator.state_dict(),
-        'optimizer_G':    optimizer_G.state_dict(),
-        'optimizer_D':    optimizer_D.state_dict(),
-        'lr_scheduler_G': lr_scheduler_G.state_dict(),
-        'lr_scheduler_D': lr_scheduler_D.state_dict(),
-        'epoch': epoch,
-        'args': args,
-    }
-    if metrics is None:
-        checkpoint_path = output_dir / ('checkpoint_{}.pth'.format(epoch))
-    else:
-        checkpoint_path = output_dir / ('checkpoint_{}_psnr_{}_ssim_{}.pth'.format(epoch, metrics[0], metrics[1]))
-        to_save['psnr'] = metrics[0]
-        to_save['ssim'] = metrics[1]
-
-    torch.save(to_save, checkpoint_path)
