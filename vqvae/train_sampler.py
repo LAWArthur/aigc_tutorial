@@ -22,7 +22,7 @@ from utils.misc import setup_seed, print_rank_0, load_model, save_sampler
 from utils.lr_scheduler import LinearWarmUpLrScheduler
 
 # ---------------- Training engine ----------------
-from vqvae_engine import train_sampler_one_epoch
+from engine import train_sampler_one_epoch
 
 
 def parse_args():
@@ -149,7 +149,7 @@ def main():
     vqvae = VQVAE(args.img_dim, num_embeddings=512, hidden_dim=128, latent_dim=64)
     if args.vqvae_checkpoint is not None:
         print(f' - Load checkpoint for VQ-VAE from the checkpoint : {args.vqvae_checkpoint} ...')
-        vqvae.load_state_dict(torch.load(args.vqvae_checkpoint, map_location="cpu").pop("model"))
+        vqvae.load_state_dict(torch.load(args.vqvae_checkpoint, map_location="cpu", weights_only=False).pop("model"))
     vqvae = vqvae.eval().to(device)
     print(vqvae)
 

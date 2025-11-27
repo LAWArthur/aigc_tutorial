@@ -2,6 +2,7 @@ import os
 import cv2
 import argparse
 import numpy as np
+import matplotlib.pyplot as plt
 
 # ---------------- Torch compoments ----------------
 import torch
@@ -58,7 +59,7 @@ def reconstruction(args, device):
     vqvae = VQVAE(args.img_dim, num_embeddings=512, hidden_dim=128, latent_dim=64)
     if args.weight_vae is not None:
         print(f' - Load checkpoint for VQ-VAE from the checkpoint : {args.weight_vae} ...')
-        checkpoint = torch.load(args.weight_vae, map_location='cpu')
+        checkpoint = torch.load(args.weight_vae, map_location='cpu', weights_only=False)
         vqvae.load_state_dict(checkpoint["model"])
     vqvae = vqvae.to(device).eval()
 
@@ -100,8 +101,8 @@ def reconstruction(args, device):
             cv2.imwrite(os.path.join(output_dir_org, f"gt_{img_id}.png"), x_org)
             cv2.imwrite(os.path.join(output_dir_rec, f"rec_{img_id}.png"), x_hat)
 
-            cv2.imshow("orig & rec", x_vis)
-            cv2.waitKey(0)
+            # cv2.imshow("orig & rec", x_vis)
+            # cv2.waitKey(0)
 
             img_id += 1
 
@@ -115,14 +116,14 @@ def completion(args, device):
     vqvae = VQVAE(args.img_dim, num_embeddings=512, hidden_dim=128, latent_dim=64)
     if args.weight_vae is not None:
         print(f' - Load checkpoint for VQ-VAE from the checkpoint : {args.weight_vae} ...')
-        checkpoint = torch.load(args.weight_vae, map_location='cpu')
+        checkpoint = torch.load(args.weight_vae, map_location='cpu', weights_only=False)
         vqvae.load_state_dict(checkpoint["model"])
     vqvae = vqvae.to(device).eval()
 
     # Build Sampler
     vqvae_sampler = build_gpt_sampler(args, vqvae.num_embeddings)
     if args.weight_sampler is not None:
-        checkpoint = torch.load(args.weight_sampler, map_location='cpu')
+        checkpoint = torch.load(args.weight_sampler, map_location='cpu', weights_only=False)
         vqvae_sampler.load_state_dict(checkpoint["model"])
     vqvae_sampler = vqvae_sampler.to(device).eval()
 
@@ -180,8 +181,8 @@ def completion(args, device):
             cv2.imwrite(os.path.join(output_dir_org, f"gt_{img_id}.png"), x_org)
             cv2.imwrite(os.path.join(output_dir_completion, f"completion_{img_id}.png"), x_hat)
 
-            cv2.imshow(f"original & reconstruct", x_vis)
-            cv2.waitKey(0)
+            # cv2.imshow(f"original & reconstruct", x_vis)
+            # cv2.waitKey(0)
 
             img_id += 1
 
@@ -192,14 +193,14 @@ def sample(args, device):
     vqvae = VQVAE(args.img_dim, num_embeddings=512, hidden_dim=128, latent_dim=64)
     if args.weight_vae is not None:
         print(f' - Load checkpoint for VQ-VAE from the checkpoint : {args.weight_vae} ...')
-        checkpoint = torch.load(args.weight_vae, map_location='cpu')
+        checkpoint = torch.load(args.weight_vae, map_location='cpu', weights_only=False)
         vqvae.load_state_dict(checkpoint["model"])
     vqvae = vqvae.to(device).eval()
 
     # Build Sampler
     vqvae_sampler = build_gpt_sampler(args, vqvae.num_embeddings)
     if args.weight_sampler is not None:
-        checkpoint = torch.load(args.weight_sampler, map_location='cpu')
+        checkpoint = torch.load(args.weight_sampler, map_location='cpu', weights_only=False)
         vqvae_sampler.load_state_dict(checkpoint["model"])
     vqvae_sampler = vqvae_sampler.to(device).eval()
 
@@ -243,10 +244,33 @@ def sample(args, device):
         print(f" =========== Image ID-[{img_id}] ============ ")
         cv2.imwrite(os.path.join(output_dir, f"sampled_{img_id}.png"), x_hat)
 
-        cv2.imshow(f"original & reconstruct", x_hat)
-        cv2.waitKey(0)
+        # cv2.imshow(f"original & reconstruct", x_hat)
+        # cv2.waitKey(0)
+
+@torch.no_grad
+def usage(args, device):
+    # Build Dataset
+    dataset    = build_dataset(args, is_train=False)
+    dataloader = build_dataloader(args, dataset, is_train=False)
+
+    # Build Model
+    vqvae = VQVAE(args.img_dim, num_embeddings=512, hidden_dim=128, latent_dim=64)
+    if args.weight_vae is not None:
+        print(f' - Load checkpoint for VQ-VAE from the checkpoint : {args.weight_vae} ...')
+        checkpoint = torch.load(args.weight_vae, map_location='cpu', weights_only=False)
+        vqvae.load_state_dict(checkpoint["model"])
+    vqvae = vqvae.to(device).eval()
 
 
+    # ----------------- Sample for VAE -----------------
+    usage = torch.zeros((vqvae.num_embeddings, ), device=device)
+    for sample in dataloader:
+        images = sample[0].to(device)
+        z_rec, ids = vqvae.forward_encode(images)
+        usage.add_(torch.bincount(ids.view(-1), minlength=vqvae.num_embeddings))
+    print(f"codebook usage: {(usage > 0).sum(0).item()}/{vqvae.num_embeddings} {(usage > 0).sum(0).item() / vqvae.num_embeddings}")
+    plt.scatter(*np.split(vqvae.codebook.embedding.weight.cpu().numpy()[:, :2], 2, 1))
+    plt.savefig("usage4.png")
 
 def main():
     args = parse_args()
@@ -272,6 +296,9 @@ def main():
 
     if args.task == "sample":
         sample(args, device)
+
+    if args.task == "usage":
+        usage(args, device)
         
 
 if __name__ == "__main__":
